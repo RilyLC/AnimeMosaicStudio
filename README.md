@@ -1,8 +1,8 @@
 # AnimeMosaicStudio
+<img src="docs/image/UI.png"/>
+用 ComfyUI 做区域级去马赛克：只把被遮挡的那一小块裁出来重绘，再贴回原图。整张图其他地方都保持原样。
 
-用 ComfyUI 做**区域级**去马赛克：只把被遮挡的那一小块裁出来重绘，再贴回原图。整张图其他地方都保持原样。
-
-支持批处理、断点续跑、手动遮罩编辑、差分复用、结果对比，全部集成在一个桌面界面里。
+支持批处理、断点续跑、手动遮罩编辑、差分复用、结果对比，全部集成在一个应用里。
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
@@ -16,10 +16,9 @@
 | 马赛克检测 | mosaic_detection_seg_L.pt | https://civitai.red/models/1308310/mosaic-detectionall-in-one |
 | NSFW 部位检测 | ntd11_anime_nsfw_segm_v5-variant1.pt | https://civitai.red/models/1313556/anime-nsfw-detection-adetailer-all-in-one |
 
-感谢以上模型作者及开源社区的贡献
+感谢以上模型作者及开源社区的贡献  
 
 > **免责声明**：使用本项目即表示你已确认：所有输入素材的版权与使用权限由你本人负责，生成结果仅供合法用途，开发者不对任何版权纠纷或使用后果承担责任。
-
 
 ---
 
@@ -98,20 +97,21 @@
 
 ## 常见问题
 
-**启动器说找不到 Python**
+**启动器说找不到 Python**  
 启动器会依次尝试：`config.json` 的 `python_exe` → 环境变量 `AMS_PYTHON` → PATH 上的 `python.exe` → `py` 启动器登记的 Python。它会先运行每个候选确认可用，所以 Microsoft Store 的 `python.exe` 占位符会被跳过。都不行时才弹文件选择框；想重新弹，就把 `python_exe` 清空。
 
-**提示缺少依赖**
+**提示缺少依赖**  
 确保config.json提供的Python解释器安装好了依赖,手动运行 `"<python>" -m pip install -r requirements.txt`。
 
-**连不上 ComfyUI**
+**连不上 ComfyUI**  
 确认 ComfyUI 已启动、地址与「设置 → ComfyUI 连接」一致；点「测试连接」看具体报错。
 
 
-**想让 torch 用 CUDA**
+**想让 torch 用 CUDA**  
 先按 https://pytorch.org 的说明装好对应 CUDA 版本的 torch。
 
-**马赛克检测速度非常慢**
+**马赛克检测速度非常慢**  
 确保安装了CUDA版torch并使用GPU进行检测,如果配置较低可以考虑将马赛克检测模型从L模型换到S模型
+
 ---
 
