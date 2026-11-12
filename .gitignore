@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.cache/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and logs (created at run time)
+config.json
+config.json.tmp
+*.log
+
+# Work / debug artefacts
+_ui_shots/
+_shot_*.png
+_nf.png
+_cf.png
+_icons.png
+_icon_*.png
+_spin_*.png
+_work/
+
+# PyInstaller output (build_launcher.bat); the built launcher exe itself is tracked
+build/
+dist/
+*.spec
+
+# IDE / OS noise
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
