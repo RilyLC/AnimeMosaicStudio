@@ -3,22 +3,26 @@
 Regions are detected independently, but their context windows can overlap.  If
 two windows overlap, processing them separately would feed the same mosaic
 pixels to the model twice (and could blend two different generations into each
-other).  This module builds a crop window per connected group instead:
+other).  This module builds one crop window per connected group instead.
 
-* every region belongs to exactly one group;
-* every group window fully contains every region in that group;
-* windows are expanded with the area rules from :func:`plan_crop`;
-* a merged window is squared around its bounding box so the model still gets a
-  square latent, and only grows when another region's bounding box falls inside
-  it, so a group remains as tight as possible while still avoiding duplicate
-  work.
+Every window is square: the model only accepts a standard square input, and a
+square crop scaled 1:1 to a square latent never distorts the art.  A group's
+window is grown around the group's *regions* (not around the sum of their
+individual context windows, which is what used to overflow the frame and fall
+back to a non-square crop).  A square may therefore contain a neighbouring
+group's mosaic; that is harmless because each group's mask only covers its own
+regions.  Only when a single region is longer than the frame's short side is the
+region split into overlapping square tiles.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .geometry import CropPlan, plan_crop
+
+Box = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -27,34 +31,85 @@ class CropGroup:
 
     plan: CropPlan
     indexes: tuple[int, ...]
-    boxes: tuple[tuple[int, int, int, int], ...]
+    boxes: tuple[Box, ...]
 
 
 def _intersects(a: CropPlan, b: CropPlan) -> bool:
     return a.left < b.right and b.left < a.right and a.top < b.bottom and b.top < a.bottom
 
 
-def _box_intersects(plan: CropPlan, box: tuple[int, int, int, int]) -> bool:
-    x, y, w, h = box
-    return plan.left < x + w and x < plan.right and plan.top < y + h and y < plan.bottom
+def _bbox(boxes: list[Box]) -> Box:
+    left = min(box[0] for box in boxes)
+    top = min(box[1] for box in boxes)
+    right = max(box[0] + box[2] for box in boxes)
+    bottom = max(box[1] + box[3] for box in boxes)
+    return left, top, right - left, bottom - top
 
 
-def _union_plan(plans: list[CropPlan], image_w: int, image_h: int) -> CropPlan:
-    left = min(plan.left for plan in plans)
-    top = min(plan.top for plan in plans)
-    right = max(plan.right for plan in plans)
-    bottom = max(plan.bottom for plan in plans)
-    width, height = right - left, bottom - top
-    if width != height:
-        # A group must still feed a square image to ComfyUI: expand the
-        # bounding box to a square centred on it, then shift it into the frame.
-        side = max(width, height)
-        if side <= min(image_w, image_h):
-            left = min(max(0, left - (side - width) // 2), image_w - side)
-            top = min(max(0, top - (side - height) // 2), image_h - side)
-            right, bottom = left + side, top + side
-            width, height = side, side
-    return CropPlan(left, top, right, bottom, width, height, width == height)
+def _fits(boxes: list[Box], limit: int) -> bool:
+    _, _, width, height = _bbox(boxes)
+    return width <= limit and height <= limit
+
+
+def _square_plan(
+    box: Box,
+    image_w: int,
+    image_h: int,
+    min_pct: float,
+    background_ratio: float,
+) -> CropPlan:
+    """A square window covering ``box``, grown by the area rule, inside the frame."""
+    x, y, width, height = box
+    limit = min(image_w, image_h)
+    area = width * height
+    target = max(
+        image_w * image_h * min(max(float(min_pct), 0.0), 100.0) / 100.0,
+        area * (1.0 + max(float(background_ratio), 0.0)),
+    )
+    side = max(int(math.ceil(math.sqrt(target))), width, height)
+    side = min(side, limit)
+    left = min(max(0, x - (side - width) // 2), image_w - side)
+    top = min(max(0, y - (side - height) // 2), image_h - side)
+    return CropPlan(left, top, left + side, top + side, side, side, True)
+
+
+def _slice(box: Box, limit: int) -> list[Box]:
+    """Cut a region that is longer than the frame's short side into square tiles.
+
+    Neighbouring tiles overlap so no mosaic pixel falls between two crops.
+    """
+    x, y, width, height = box
+    if width <= limit and height <= limit:
+        return [box]
+
+    step = max(1, limit - limit // 4)
+    parts: list[Box] = []
+    if width >= height:
+        offset = 0
+        while offset < width:
+            parts.append((x + offset, y, min(limit, width - offset), height))
+            offset += step
+    else:
+        offset = 0
+        while offset < height:
+            parts.append((x, y + offset, width, min(limit, height - offset)))
+            offset += step
+
+    pieces: list[Box] = []
+    for part in parts:
+        pieces.extend(_slice(part, limit))
+    return pieces
+
+
+def _chunks(pieces: list[tuple[Box, int]], limit: int) -> list[list[tuple[Box, int]]]:
+    """Greedily pack tiles into groups whose bounding box is still squareable."""
+    chunks: list[list[tuple[Box, int]]] = []
+    for piece in sorted(pieces, key=lambda item: (item[0][0], item[0][1])):
+        if chunks and _fits([box for box, _ in chunks[-1]] + [piece[0]], limit):
+            chunks[-1].append(piece)
+        else:
+            chunks.append([piece])
+    return chunks
 
 
 def group_crops(
@@ -65,22 +120,18 @@ def group_crops(
     *,
     background_ratio: float = 2.0,
 ) -> list[CropGroup]:
-    """Plan disjoint-by-region crop groups for a list of region boxes.
+    """Plan crop groups for a list of region boxes.
 
-    The returned groups cover every input index exactly once.  Groups are
-    ordered by their first region, which keeps logs and seeds deterministic.
+    Groups are ordered by their first region, which keeps logs and seeds
+    deterministic.  A region longer than the frame's short side appears in more
+    than one group (its tiles), otherwise every index appears exactly once.
     """
     if not boxes:
         return []
 
+    limit = min(image_w, image_h)
     plans = [
-        plan_crop(
-            box,
-            image_w,
-            image_h,
-            min_pct,
-            background_ratio=background_ratio,
-        )
+        plan_crop(box, image_w, image_h, min_pct, background_ratio=background_ratio)
         for box in boxes
     ]
 
@@ -92,39 +143,17 @@ def group_crops(
             index = parent[index]
         return index
 
-    def union(a: int, b: int) -> bool:
+    def union(a: int, b: int) -> None:
         root_a, root_b = find(a), find(b)
-        if root_a == root_b:
-            return False
-        parent[root_b] = root_a
-        return True
+        if root_a != root_b:
+            parent[root_b] = root_a
 
-    # Windows that overlap cannot be processed independently: their masks may
-    # contain pixels from the neighbouring region.
+    # Context windows that overlap are processed together so one mosaic area is
+    # never fed to the model twice by two different groups.
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
             if _intersects(plans[i], plans[j]):
                 union(i, j)
-
-    # The bounding rectangle of a group can cover a region whose own window
-    # happened to sit in a corner of that rectangle.  Include it as well, then
-    # recompute until stable so every masked pixel is covered by exactly one
-    # group.
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(boxes)):
-            root = find(i)
-            members = [index for index in range(len(boxes)) if find(index) == root]
-            group_plan = _union_plan(
-                [plans[index] for index in members], image_w, image_h
-            )
-            for j in range(len(boxes)):
-                if find(j) == root:
-                    continue
-                if _box_intersects(group_plan, boxes[j]):
-                    union(root, j)
-                    changed = True
 
     grouped: dict[int, list[int]] = {}
     for index in range(len(boxes)):
@@ -132,14 +161,24 @@ def group_crops(
 
     result: list[CropGroup] = []
     for indexes in sorted(grouped.values(), key=lambda items: min(items)):
-        group_plan = _union_plan(
-            [plans[index] for index in indexes], image_w, image_h
-        )
-        result.append(
-            CropGroup(
-                plan=group_plan,
-                indexes=tuple(indexes),
-                boxes=tuple(boxes[index] for index in indexes),
+        pieces: list[tuple[Box, int]] = []
+        for index in indexes:
+            for piece in _slice(boxes[index], limit):
+                pieces.append((piece, index))
+        for chunk in _chunks(pieces, limit):
+            chunk_indexes = tuple(sorted({index for _, index in chunk}))
+            plan = _square_plan(
+                _bbox([box for box, _ in chunk]),
+                image_w,
+                image_h,
+                min_pct,
+                background_ratio,
             )
-        )
+            result.append(
+                CropGroup(
+                    plan=plan,
+                    indexes=chunk_indexes,
+                    boxes=tuple(boxes[index] for index in chunk_indexes),
+                )
+            )
     return result

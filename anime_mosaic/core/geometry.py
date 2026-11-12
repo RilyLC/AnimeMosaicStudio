@@ -60,7 +60,8 @@ def plan_crop(
     When the region's long side exceeds the image's short side (e.g. a 3000x200
     mosaic in a 3840x2160 frame) no square inside the frame can contain the
     region, so the older uniform-ring window is used instead and
-    ``CropPlan.square`` is False; the pipeline logs a warning for those.
+    ``CropPlan.square`` is False.  :func:`group_crops` never returns such a plan:
+    it splits the region into overlapping square tiles first.
 
     Tiny regions are fine: ``min_pct`` is the floor that keeps a 10x10 detection
     from producing a 10x10 crop.  Only a degenerate region (zero width or
@@ -110,13 +111,20 @@ def plan_crop(
     return CropPlan(left, top, left + cw, top + ch, cw, ch, cw == ch)
 
 
+def square_model_size(size: int, min_side: int = 128) -> int:
+    """The model's standard square input side, snapped to the 64 grid."""
+    side = max(int(min_side), int(size))
+    return max(LATENT_MULTIPLE, int(round(side / LATENT_MULTIPLE)) * LATENT_MULTIPLE)
+
+
 def model_size(plan: CropPlan, size: int, min_side: int = 128) -> tuple[int, int]:
     """Model input size: square plans get a square latent on the 64 grid."""
     if plan.square:
-        side = max(int(min_side), int(size))
-        side = max(LATENT_MULTIPLE, int(round(side / LATENT_MULTIPLE)) * LATENT_MULTIPLE)
+        side = square_model_size(size, min_side)
         return side, side
     # Rare non-square fallback: keep the crop aspect on the 32 grid.
+    # (The pipeline pads these crops and feeds a standard square instead; this
+    # branch is kept for callers that still ask for the legacy behaviour.)
     scale = size / float(max(plan.out_w, plan.out_h))
     width = max(int(min_side), int(round(plan.out_w * scale / 32.0)) * 32)
     height = max(int(min_side), int(round(plan.out_h * scale / 32.0)) * 32)

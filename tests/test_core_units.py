@@ -8,12 +8,13 @@ import tempfile
 import unittest
 
 import numpy as np
+from PIL import Image
 
 from anime_mosaic.core.blending import blend, hard_blend, laplacian_blend, seamless_blend
 from anime_mosaic.core.discovery import discover_images, find_ultralytics_model
 from anime_mosaic.core.crop_groups import group_crops
 from anime_mosaic.core.errors import PipelineError
-from anime_mosaic.core.geometry import CropPlan, model_size, plan_crop
+from anime_mosaic.core.geometry import CropPlan, model_size, plan_crop, square_model_size
 from anime_mosaic.core.manual_mask import ManualMaskStore, decode_mask, encode_mask
 from anime_mosaic.core.masking import connected_regions, grow_mask
 from anime_mosaic.core.maskplan import build_manual_plan, build_mask_plan
@@ -134,6 +135,10 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(model_size(plan, 700), (704, 704))
         self.assertEqual(model_size(plan, 64, min_side=128), (128, 128))
 
+    def test_square_model_size_is_standard_for_fallback_crops(self):
+        self.assertEqual(square_model_size(768), 768)
+        self.assertEqual(square_model_size(1000), 1024)
+        self.assertEqual(square_model_size(64), 128)
 
 class CropGroupTests(unittest.TestCase):
     def test_overlapping_regions_share_one_crop(self):
@@ -183,12 +188,31 @@ class CropGroupTests(unittest.TestCase):
         self.assertLessEqual(plan.right, 800)
         self.assertLessEqual(plan.bottom, 400)
 
-    def test_group_cannot_square_when_region_exceeds_short_side(self):
+    def test_long_region_is_split_into_square_tiles(self):
         groups = group_crops([(0, 0, 900, 100)], 1000, 400, 5.0, background_ratio=0.0)
+        self.assertGreaterEqual(len(groups), 3)
+        for group in groups:
+            self.assertTrue(group.plan.square)
+            self.assertEqual(group.plan.width, group.plan.height)
+            self.assertLessEqual(group.plan.width, 400)
+        self.assertLessEqual(min(group.plan.left for group in groups), 0)
+        self.assertGreaterEqual(max(group.plan.right for group in groups), 900)
+
+    def test_group_is_square_when_separate_windows_overflow_the_frame(self):
+        # Real frame_0017 geometry: the sum of the three 720px context windows
+        # is 1256x1057, wider than the 1080px short side, but the regions
+        # themselves fit one square.
+        boxes = [(831, 202, 253, 155), (825, 594, 165, 120), (320, 645, 203, 104)]
+        groups = group_crops(boxes, 1920, 1080, 25.0, background_ratio=2.0)
+        self.assertEqual(len(groups), 1)
         plan = groups[0].plan
-        self.assertFalse(plan.square)
-        self.assertGreaterEqual(plan.right, 900)
-        self.assertGreaterEqual(plan.bottom, 100)
+        self.assertTrue(plan.square)
+        self.assertLessEqual(plan.width, 1080)
+        for x, y, w, h in boxes:
+            self.assertLessEqual(plan.left, x)
+            self.assertLessEqual(plan.top, y)
+            self.assertGreaterEqual(plan.right, x + w)
+            self.assertGreaterEqual(plan.bottom, y + h)
 
     def test_model_size_snaps_to_32(self):
         plan = CropPlan(0, 0, 300, 200, 300, 200, False)
@@ -238,6 +262,30 @@ class BlendingTests(unittest.TestCase):
         border = np.zeros((64, 64), np.uint8)
         border[0:10, 10:30] = 255
         self.assertIsNone(seamless_blend(self.base, self.generated, border))
+
+    def test_seamless_blend_never_touches_pixels_outside_mask(self):
+        mask = np.zeros((300, 420), np.uint8)
+        mask[40:120, 30:200] = 255
+        mask[190:260, 300:390] = 255
+        rng = np.random.default_rng(13)
+        base = (rng.random((300, 420, 3)) * 180 + 40).astype(np.uint8)
+        generated = (rng.random((300, 420, 3)) * 180 + 40).astype(np.uint8)
+        out = seamless_blend(base, generated, mask)
+        self.assertIsNotNone(out)
+        np.testing.assert_array_equal(out[mask == 0], base[mask == 0])
+
+    def test_seamless_blend_keeps_multipart_mask_aligned(self):
+        rng = np.random.default_rng(11)
+        base = (rng.random((300, 420, 3)) * 180 + 40).astype(np.uint8)
+        mask = np.zeros((300, 420), np.uint8)
+        mask[40:120, 30:200] = 255
+        mask[190:260, 300:390] = 255
+        masked = seamless_blend(base, base.copy(), mask)
+        self.assertIsNotNone(masked)
+        diff = np.abs(masked.astype(int) - base.astype(int)).max(axis=2)
+        # Centring on the mask centroid shifted an identity blend by ~30x15 px
+        # (diff > 100 outside the mask); the bounding-box centre is exact.
+        self.assertLessEqual(int(diff.max()), 2)
 
     def test_blend_falls_back_to_hard_for_border_mask(self):
         border = np.zeros((64, 64), np.uint8)

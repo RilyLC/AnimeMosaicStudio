@@ -55,9 +55,19 @@ def seamless_blend(
     try:
         src_bgr = cv2.cvtColor(generated, cv2.COLOR_RGB2BGR)
         dst_bgr = cv2.cvtColor(np.ascontiguousarray(base), cv2.COLOR_RGB2BGR)
-        center = (int(xs.mean()), int(ys.mean()))
+        # seamlessClone anchors the source by the mask's *bounding-box* centre,
+        # not its centroid.  Passing the centroid shifted the whole patch (and
+        # spilled generated pixels outside the mask) whenever the mask had
+        # several components or an irregular outline.
+        mask_x, mask_y, mask_w, mask_h = cv2.boundingRect(mask_u8)
+        center = (mask_x + mask_w // 2, mask_y + mask_h // 2)
         clone_mode = SEAMLESS_CLONE_MODES.get(mode, cv2.NORMAL_CLONE)
         blended = cv2.seamlessClone(src_bgr, dst_bgr, mask_u8, center, clone_mode)
+        # seamlessClone also nudges pixels *outside* the mask inside its
+        # bounding box (Poisson colour adaptation).  Keep them identical to the
+        # input so only the mosaic area ever changes.
+        outside = mask_u8 == 0
+        blended[outside] = dst_bgr[outside]
         blended_rgb = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB).astype(np.float32)
         if strength >= 0.999 and feather <= 0:
             return np.rint(np.clip(blended_rgb, 0, 255)).astype(np.uint8)
@@ -171,7 +181,7 @@ def blend(
     binary = (mask > 127).astype(np.float32)
     if method == "laplacian":
         try:
-            return laplacian_blend(
+            blended = laplacian_blend(
                 base,
                 generated,
                 binary,
@@ -181,6 +191,10 @@ def blend(
                 gamma=laplacian_gamma,
                 lowfreq=laplacian_lowfreq,
             )
+            # The coarse pyramid bands carry the mask influence a few dozen
+            # pixels past its edge; keep the untouched art bit-identical.
+            blended[binary == 0] = base[binary == 0]
+            return blended
         except Exception:
             return hard_blend(base, generated, binary)
     if method == "seamless":

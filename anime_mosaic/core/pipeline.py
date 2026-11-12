@@ -482,14 +482,6 @@ class Pipeline:
             background_ratio=settings.crop_background_ratio,
         )
 
-        fallback = sum(1 for group in groups if not group.plan.square)
-        if fallback:
-            self.reporter.log(
-                "warn",
-                f"    {fallback}/{len(groups)} 个裁切组超出画面短边，"
-                "无法用正方形窗口包住区域，已回退为非方形裁切",
-            )
-
         out = rgb.copy()
         seeds: list[int] = []
         reused_any = False
@@ -506,7 +498,6 @@ class Pipeline:
             info = self._inpaint_region(out, mask, group.plan, seed, rel, positive)
             reused_any = reused_any or bool(info.get("reused"))
             seeds.append(int(info.get("seed", seed)))
-            self.counts["regions"] += len(group.indexes)
             first = regions[group.indexes[0]]
             extent = f"{group.plan.width}x{group.plan.height}"
             if len(group.indexes) == 1:
@@ -524,6 +515,7 @@ class Pipeline:
                     f"{info['seconds']:.1f}s",
                 )
 
+        self.counts["regions"] += len(regions)
         self.reporter.stage(rel, "save")
         save_like(out, original, dst)
         elapsed = time.time() - started
@@ -593,6 +585,8 @@ class Pipeline:
             )
         else:
             for attempt in range(2):
+                # Group crops are always square, so the model gets its standard
+                # square input without stretching the art.
                 model_w, model_h = model_size(plan, size, settings.min_side)
                 crop_model, mask_model = model_inputs(crop_rgb, crop_mask, model_w, model_h)
 
